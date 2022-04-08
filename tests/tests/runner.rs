@@ -116,7 +116,6 @@ async fn setup(
     let mut opt = Opt::default();
     let postgres_url = env::var("THEGRAPH_STORE_POSTGRES_DIESEL_URL")
         .unwrap_or("postgresql://graph-node:let-me-in@127.0.0.1:5432/graph-node".into());
-
     opt.postgres_url = Some(postgres_url);
     let node_id = NodeId::new(opt.node_id.clone()).expect("invalid node_id");
     let config = Config::load(&logger, &opt).expect("failed to create configuration");
