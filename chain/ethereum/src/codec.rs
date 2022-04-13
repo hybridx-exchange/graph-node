@@ -6,10 +6,9 @@ use graph::{
     blockchain::{Block as BlockchainBlock, BlockPtr},
     prelude::{
         web3,
-        web3::types::TransactionReceipt as W3TransactionReceipt,
         web3::types::{Bytes, H160, H2048, H256, H64, U256, U64},
         BlockNumber, Error, EthereumBlock, EthereumBlockWithCalls, EthereumCall,
-        LightEthereumBlock, TryFutureExt,
+        LightEthereumBlock,
     },
 };
 use std::sync::Arc;
@@ -18,6 +17,23 @@ use std::{convert::TryFrom, fmt::Debug};
 use crate::chain::BlockFinality;
 
 pub use pbcodec::*;
+
+trait TryDecodeProto<U, V>: Sized
+where
+    U: TryFrom<Self>,
+    <U as TryFrom<Self>>::Error: Debug,
+    V: From<U>,
+{
+    fn try_decode_proto(self, label: &'static str) -> Result<V, Error> {
+        let u = U::try_from(self).map_err(|e| format_err!("invalid {}: {:?}", label, e))?;
+        let v = V::from(u);
+        Ok(v)
+    }
+}
+
+impl TryDecodeProto<[u8; 256], H2048> for &[u8] {}
+impl TryDecodeProto<[u8; 32], H256> for &[u8] {}
+impl TryDecodeProto<[u8; 20], H160> for &[u8] {}
 
 impl Into<web3::types::U256> for &BigInt {
     fn into(self) -> web3::types::U256 {
@@ -37,11 +53,13 @@ impl<'a> CallAt<'a> {
     }
 }
 
-impl<'a> Into<EthereumCall> for CallAt<'a> {
-    fn into(self) -> EthereumCall {
-        EthereumCall {
-            from: H160::from_slice(&self.call.caller),
-            to: H160::from_slice(&self.call.address),
+impl<'a> TryInto<EthereumCall> for CallAt<'a> {
+    type Error = Error;
+
+    fn try_into(self) -> Result<EthereumCall, Self::Error> {
+        Ok(EthereumCall {
+            from: self.call.caller.try_decode_proto("call from address")?,
+            to: self.call.address.try_decode_proto("call to address")?,
             value: self
                 .call
                 .value
@@ -50,19 +68,21 @@ impl<'a> Into<EthereumCall> for CallAt<'a> {
             gas_used: U256::from(self.call.gas_consumed),
             input: Bytes(self.call.input.clone()),
             output: Bytes(self.call.return_data.clone()),
-            block_hash: H256::from_slice(&self.block.hash),
+            block_hash: self.block.hash.try_decode_proto("call block hash")?,
             block_number: self.block.number as i32,
-            transaction_hash: Some(H256::from_slice(&self.trace.hash)),
+            transaction_hash: Some(self.trace.hash.try_decode_proto("call transaction hash")?),
             transaction_index: self.trace.index as u64,
-        }
+        })
     }
 }
 
-impl Into<web3::types::Call> for Call {
-    fn into(self) -> web3::types::Call {
-        web3::types::Call {
-            from: H160::from_slice(&self.caller),
-            to: H160::from_slice(&self.address),
+impl TryInto<web3::types::Call> for Call {
+    type Error = Error;
+
+    fn try_into(self) -> Result<web3::types::Call, Self::Error> {
+        Ok(web3::types::Call {
+            from: self.caller.try_decode_proto("call from address")?,
+            to: self.address.try_decode_proto("call to address")?,
             value: self
                 .value
                 .as_ref()
@@ -70,9 +90,9 @@ impl Into<web3::types::Call> for Call {
             gas: U256::from(self.gas_limit),
             input: Bytes::from(self.input.clone()),
             call_type: CallType::from_i32(self.call_type)
-                .expect("CallType invalid enum value")
+                .ok_or_else(|| format_err!("invalid call type: {}", self.call_type,))?
                 .into(),
-        }
+        })
     }
 }
 
@@ -103,26 +123,28 @@ impl<'a> LogAt<'a> {
     }
 }
 
-impl<'a> Into<web3::types::Log> for LogAt<'a> {
-    fn into(self) -> web3::types::Log {
-        web3::types::Log {
-            address: H160::from_slice(&self.log.address),
+impl<'a> TryInto<web3::types::Log> for LogAt<'a> {
+    type Error = Error;
+
+    fn try_into(self) -> Result<web3::types::Log, Self::Error> {
+        Ok(web3::types::Log {
+            address: self.log.address.try_decode_proto("log address")?,
             topics: self
                 .log
                 .topics
                 .iter()
-                .map(|t| H256::from_slice(t))
-                .collect(),
+                .map(|t| t.try_decode_proto("topic"))
+                .collect::<Result<Vec<H256>, Error>>()?,
             data: Bytes::from(self.log.data.clone()),
-            block_hash: Some(H256::from_slice(&self.block.hash)),
+            block_hash: Some(self.block.hash.try_decode_proto("log block hash")?),
             block_number: Some(U64::from(self.block.number)),
-            transaction_hash: Some(H256::from_slice(&self.trace.hash)),
+            transaction_hash: Some(self.trace.hash.try_decode_proto("log transaction hash")?),
             transaction_index: Some(U64::from(self.trace.index as u64)),
             log_index: Some(U256::from(self.log.block_index)),
             transaction_log_index: Some(U256::from(self.log.index)),
             log_type: None,
             removed: None,
-        }
+        })
     }
 }
 
@@ -157,16 +179,22 @@ impl<'a> TransactionTraceAt<'a> {
     }
 }
 
-impl<'a> Into<web3::types::Transaction> for TransactionTraceAt<'a> {
-    fn into(self) -> web3::types::Transaction {
-        web3::types::Transaction {
-            hash: H256::from_slice(&self.trace.hash),
+impl<'a> TryInto<web3::types::Transaction> for TransactionTraceAt<'a> {
+    type Error = Error;
+
+    fn try_into(self) -> Result<web3::types::Transaction, Self::Error> {
+        Ok(web3::types::Transaction {
+            hash: self.trace.hash.try_decode_proto("transaction hash")?,
             nonce: U256::from(self.trace.nonce),
-            block_hash: Some(H256::from_slice(&self.block.hash)),
+            block_hash: Some(self.block.hash.try_decode_proto("transaction block hash")?),
             block_number: Some(U64::from(self.block.number)),
             transaction_index: Some(U64::from(self.trace.index as u64)),
-            from: Some(H160::from_slice(&self.trace.from)),
-            to: Some(H160::from_slice(&self.trace.to)),
+            from: Some(
+                self.trace
+                    .from
+                    .try_decode_proto("transaction from address")?,
+            ),
+            to: Some(self.trace.to.try_decode_proto("transaction to address")?),
             value: self.trace.value.as_ref().map_or(U256::zero(), |x| x.into()),
             gas_price: self.trace.gas_price.as_ref().map(|x| x.into()),
             gas: U256::from(self.trace.gas_used),
@@ -179,32 +207,17 @@ impl<'a> Into<web3::types::Transaction> for TransactionTraceAt<'a> {
             max_fee_per_gas: None,
             max_priority_fee_per_gas: None,
             transaction_type: None,
-        }
+        })
     }
 }
 
-impl Into<BlockFinality> for &Block {
-    fn into(self) -> BlockFinality {
-        BlockFinality::NonFinal(self.into())
+impl TryInto<BlockFinality> for &Block {
+    type Error = Error;
+
+    fn try_into(self) -> Result<BlockFinality, Self::Error> {
+        Ok(BlockFinality::NonFinal(self.try_into()?))
     }
 }
-
-trait TryDecodeProto<U, V>: Sized
-where
-    U: TryFrom<Self>,
-    <U as TryFrom<Self>>::Error: Debug,
-    V: From<U>,
-{
-    fn try_decode_proto(self, label: &'static str) -> Result<V, Error> {
-        let u = U::try_from(self).map_err(|e| format_err!("invalid {}: {:?}", label, e))?;
-        let v = V::from(u);
-        Ok(v)
-    }
-}
-
-impl TryDecodeProto<[u8; 256], H2048> for Vec<u8> {}
-impl TryDecodeProto<[u8; 32], H256> for Vec<u8> {}
-impl TryDecodeProto<[u8; 20], H160> for Vec<u8> {}
 
 impl TryInto<EthereumBlockWithCalls> for &Block {
     type Error = Error;
@@ -259,7 +272,7 @@ impl TryInto<EthereumBlockWithCalls> for &Block {
                         .transaction_traces
                         .iter()
                         .map(|t| TransactionTraceAt::new(t, &self).try_into())
-                        .collect::<Result<Vec<_>, _>>()?,
+                        .collect::<Result<Vec<web3::types::Transaction>, Error>>()?,
                     size: Some(U256::from(self.size)),
                     mix_hash: Some(header.mix_hash.try_decode_proto("mix hash")?),
                     nonce: Some(H64::from_low_u64_be(header.nonce)),
@@ -269,7 +282,7 @@ impl TryInto<EthereumBlockWithCalls> for &Block {
                     .iter()
                     .filter_map(|t| {
                         t.receipt.as_ref().map(|r| {
-                            Ok(W3TransactionReceipt {
+                            Ok(web3::types::TransactionReceipt {
                                 transaction_hash: t.hash.try_decode_proto("transaction hash")?,
                                 transaction_index: U64::from(t.index),
                                 block_hash: Some(
@@ -282,16 +295,22 @@ impl TryInto<EthereumBlockWithCalls> for &Block {
                                 contract_address: {
                                     match t.calls.len() {
                                         0 => None,
-                                        _ => match CallType::from_i32(t.calls[0].call_type)
-                                            .expect("invalid enum type")
-                                        {
-                                            CallType::Create => {
-                                                Some(t.calls[0].address.try_decode_proto(
-                                                    "transaction contract address",
-                                                )?)
+                                        _ => {
+                                            match CallType::from_i32(t.calls[0].call_type)
+                                                .ok_or_else(|| {
+                                                    format_err!(
+                                                        "invalid call type: {}",
+                                                        t.calls[0].call_type,
+                                                    )
+                                                })? {
+                                                CallType::Create => {
+                                                    Some(t.calls[0].address.try_decode_proto(
+                                                        "transaction contract address",
+                                                    )?)
+                                                }
+                                                _ => None,
                                             }
-                                            _ => None,
-                                        },
+                                        }
                                     }
                                 },
                                 logs: r
@@ -341,7 +360,7 @@ impl TryInto<EthereumBlockWithCalls> for &Block {
                             .calls
                             .iter()
                             .map(|call| CallAt::new(call, self, trace).try_into())
-                            .collect::<Vec<Result<EthereumCall, _>>>()
+                            .collect::<Vec<Result<EthereumCall, Error>>>()
                     })
                     .collect::<Result<_, _>>()?,
             ),
